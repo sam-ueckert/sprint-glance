@@ -53,7 +53,8 @@ DEFAULTS = {
     "site": "",                 # https://yourcompany.atlassian.net
     "email": "",                # the email you log in to Jira with
     "extra_assignees": [],      # more Jira account IDs whose stories you also own
-    "jql": "",                  # replaces the built-in query when set
+    "boards": [],               # [{"id": 12, "name": "..."}]; empty means every board
+    "jql": "",                  # replaces the built-in query (and boards) when set
     "sprint_field": "customfield_10020",  # setup looks up the real one
     "auto_close_seconds": 90,
     "status_colours": {},       # {"In Review": "#9333ea"} overrides by status name
@@ -266,7 +267,7 @@ HTTP_HINTS = {
     401: "Jira rejected the email or API token (HTTP 401). Run setup again.",
     403: "Jira refused the request (HTTP 403). If you've had several failed logins, "
          "sign in once in a browser to clear the CAPTCHA.",
-    404: "Not found (HTTP 404). Check the Jira site address.",
+    404: "Jira returned HTTP 404 (not found).",
 }
 
 
@@ -294,11 +295,13 @@ def jira(cfg, token, method, path, body=None):
         raise JiraError(f"Can't reach {cfg['site']}: {getattr(e, 'reason', e)}") from None
 
 
-def build_jql(cfg):
+def build_jql(cfg, sprint_ids=None):
+    """sprint_ids limits the search to those sprints; None means every open sprint."""
     if cfg.get("jql"):
         return cfg["jql"]
     who = ", ".join(["currentUser()"] + [json.dumps(a) for a in cfg.get("extra_assignees") or []])
-    return (f"assignee in ({who}) AND sprint in openSprints() AND statusCategory != Done "
+    sprints = "openSprints()" if sprint_ids is None else "(" + ", ".join(map(str, sprint_ids)) + ")"
+    return (f"assignee in ({who}) AND sprint in {sprints} AND statusCategory != Done "
             "ORDER BY status DESC, priority DESC, updated DESC")
 
 
@@ -309,23 +312,51 @@ def find_sprint_field(cfg, token):
     return None
 
 
-def fetch_stories(cfg):
-    """Return {"sprints": [{"name", "end", "stories": [...]}, ...]}, soonest end first."""
-    token = get_token(cfg)
-    sprint_field = cfg["sprint_field"]
+def search_issues(cfg, token, jql, fields):
     issues, page = [], None
     while True:
-        body = {"jql": build_jql(cfg), "maxResults": 100,
-                "fields": ["summary", "status", "priority", "issuetype", sprint_field]}
+        body = {"jql": jql, "maxResults": 100, "fields": fields}
         if page:
             body["nextPageToken"] = page
         data = jira(cfg, token, "POST", "/rest/api/2/search/jql", body)
         issues += data.get("issues", [])
         page = data.get("nextPageToken")
         if not page or len(issues) >= 300:
-            break
+            return issues
 
-    # openSprints() spans every board, so group by sprint rather than assume one.
+
+def active_sprint_ids(cfg, token):
+    """IDs of the active sprints on the configured boards, looked up on every run
+    so a new sprint is picked up without re-running setup."""
+    ids, errors = [], []
+    for board in cfg["boards"]:
+        try:
+            data = jira(cfg, token, "GET",
+                        f"/rest/agile/1.0/board/{int(board['id'])}/sprint?state=active")
+        except JiraError as e:  # deleted board, or a Kanban board with no sprints
+            errors.append(f"{board.get('name') or board['id']}: {e}")
+            continue
+        ids += [s["id"] for s in data.get("values", [])]
+    if errors and len(errors) == len(cfg["boards"]):
+        raise JiraError("Couldn't read the chosen boards. " + " ".join(errors))
+    return ids
+
+
+def fetch_stories(cfg):
+    """Return {"sprints": [{"name", "end", "stories": [...]}, ...]}, soonest end first,
+    plus "note" when there is nothing to show for a reason other than no stories."""
+    token = get_token(cfg)
+    sprint_field = cfg["sprint_field"]
+    sprint_ids = None
+    if cfg.get("boards") and not cfg.get("jql"):
+        sprint_ids = active_sprint_ids(cfg, token)
+        if not sprint_ids:
+            names = ", ".join(b.get("name") or str(b["id"]) for b in cfg["boards"])
+            return {"sprints": [], "note": f"No active sprint on {names}."}
+    issues = search_issues(cfg, token, build_jql(cfg, sprint_ids),
+                           ["summary", "status", "priority", "issuetype", sprint_field])
+
+    # One person can have stories on several boards, so group by sprint.
     groups = {}
     for issue in issues:
         f = issue["fields"]
@@ -477,7 +508,8 @@ class Popup:
         else:
             sprints = result["data"]["sprints"]
             if not sprints:
-                t.insert("end", "No open stories assigned to you in an active sprint.")
+                t.insert("end", result["data"].get("note")
+                         or "No open stories assigned to you in an active sprint.")
             n = 0
             for g, sprint in enumerate(sprints):
                 if g:
@@ -749,6 +781,136 @@ def normalise_site(s):
     return "https://" + urllib.parse.urlparse(s).netloc
 
 
+TOKEN_PAGE = "https://id.atlassian.com/manage-profile/security/api-tokens"
+
+
+def token_walkthrough():
+    print(f"""
+Sprint Glance signs in to Jira with an API token. To make one:
+  1. Go to {TOKEN_PAGE}
+     (sign in with the same Atlassian account as your Jira email).
+  2. Click "Create API token". Use the plain one, not "Create API token with scopes".
+  3. Name it "Sprint Glance", choose an expiry date, and click Create.
+  4. Click Copy, come back here, and paste it below.
+When the token expires, run setup again and paste a new one.
+""")
+    if yes("Open that page in your browser now?"):
+        webbrowser.open(TOKEN_PAGE)
+
+
+def pick_numbers(reply, count):
+    """'1, 3' -> [0, 2]; None if reply isn't a list of numbers from 1 to count."""
+    try:
+        picks = [int(p) for p in reply.replace(",", " ").split()]
+    except ValueError:
+        return None
+    return [p - 1 for p in picks] if picks and all(1 <= p <= count for p in picks) else None
+
+
+def choose_accounts(cfg, token, me):
+    print(f"\nStories assigned to {me.get('displayName') or 'you'} are always included.")
+    current = cfg.get("extra_assignees") or []
+    if current:
+        names = []
+        for account_id in current:
+            try:
+                user = jira(cfg, token, "GET", "/rest/api/3/user?"
+                            + urllib.parse.urlencode({"accountId": account_id}))
+                names.append(user.get("displayName") or account_id)
+            except JiraError:
+                names.append(account_id)
+        print("Also included: " + ", ".join(names))
+        if yes("Keep these?"):
+            return
+    chosen = []
+    if not yes("Are some of your stories assigned to another Jira account, such as a second login?",
+               default=False):
+        cfg["extra_assignees"] = []
+        return
+    while True:
+        query = ask("Search by name or email (Enter when done)")
+        if not query:
+            break
+        users = jira(cfg, token, "GET", "/rest/api/3/user/search?"
+                     + urllib.parse.urlencode({"query": query, "maxResults": 10}))
+        users = [u for u in users if u.get("accountType") == "atlassian" and u.get("active", True)
+                 and u["accountId"] != me.get("accountId") and u["accountId"] not in chosen]
+        if not users:
+            print("No matching accounts.")
+            continue
+        for i, u in enumerate(users, 1):
+            email = f" <{u['emailAddress']}>" if u.get("emailAddress") else ""
+            print(f"  {i}. {u.get('displayName')}{email}")
+        picks = pick_numbers(ask("Number(s) to add (Enter to skip)"), len(users))
+        for p in picks or []:
+            chosen.append(users[p]["accountId"])
+            print(f"Added {users[p].get('displayName')}.")
+    cfg["extra_assignees"] = chosen
+
+
+def board_name(cfg, token, board_id):
+    try:
+        return jira(cfg, token, "GET", f"/rest/agile/1.0/board/{int(board_id)}").get("name")
+    except JiraError:
+        return None
+
+
+def choose_boards(cfg, token):
+    if cfg.get("jql"):
+        print("\nA custom jql is set in the config file, so board choice is skipped.")
+        return
+    # Suggest the boards whose active sprints already hold your stories.
+    found = {}
+    issues = search_issues(cfg, token, build_jql(cfg), [cfg["sprint_field"]])
+    for issue in issues:
+        for s in issue["fields"].get(cfg["sprint_field"]) or []:
+            if isinstance(s, dict) and s.get("state") == "active" and s.get("boardId"):
+                found.setdefault(s["boardId"], None)
+    options = [{"id": b, "name": board_name(cfg, token, b) or f"Board {b}"} for b in found]
+    for b in cfg.get("boards") or []:
+        if b["id"] not in found:
+            options.append(b)
+    current = {b["id"] for b in cfg.get("boards") or []}
+
+    print("\nWhich boards should it show?")
+    while True:
+        print("  0. All boards: every active sprint you have stories in")
+        for i, b in enumerate(options, 1):
+            print(f"  {i}. {b['name']}" + ("  (current)" if b["id"] in current else ""))
+        default = ", ".join(str(i) for i, b in enumerate(options, 1) if b["id"] in current) or "0"
+        reply = ask("Numbers separated by commas, 0 for all, or part of a board name to search",
+                    default)
+        if reply.strip() == "0":
+            cfg["boards"] = []
+            print("Showing all boards.")
+            return
+        picks = pick_numbers(reply, len(options))
+        if picks is not None:
+            usable = []
+            for b in (options[p] for p in picks):
+                try:  # Kanban boards answer 400 "The board does not support sprints"
+                    jira(cfg, token, "GET",
+                         f"/rest/agile/1.0/board/{int(b['id'])}/sprint?state=active&maxResults=1")
+                    usable.append(b)
+                except JiraError as e:
+                    print(f"Can't use {b['name']}: {e}")
+            if usable:
+                cfg["boards"] = usable
+                print("Showing " + ", ".join(b["name"] for b in usable) + ".")
+                return
+            continue
+        if reply.strip().isdigit() or "," in reply:
+            print("Pick from the numbers listed.")
+            continue
+        results = jira(cfg, token, "GET", "/rest/agile/1.0/board?"
+                       + urllib.parse.urlencode({"name": reply.strip(), "maxResults": 20}))
+        new = [{"id": b["id"], "name": b["name"]} for b in results.get("values", [])
+               if b["id"] not in {o["id"] for o in options}]
+        if not new:
+            print(f"No other boards match {reply.strip()!r}.")
+        options += new
+
+
 def cmd_setup(_args):
     cfg = load_config()
     print(f"{DISPLAY_NAME} setup. Press Enter to keep a value in brackets.\n")
@@ -767,9 +929,8 @@ def cmd_setup(_args):
         elif stored and yes("A token is already stored for this email. Keep it?"):
             token = stored
         else:
-            print("\nCreate an API token at "
-                  "https://id.atlassian.com/manage-profile/security/api-tokens")
-            token = getpass.getpass("Paste the token (input is hidden): ").strip()
+            token_walkthrough()
+            token = getpass.getpass("Paste the token (nothing shows as you paste): ").strip()
             if not TOKEN_RE.fullmatch(token):
                 print("That doesn't look like an API token.\n")
                 continue
@@ -788,6 +949,13 @@ def cmd_setup(_args):
         store_set(cfg["email"], token)
         print("Token saved to the " + ("macOS Keychain." if IS_MAC else "Windows Credential Manager."))
     cfg["sprint_field"] = find_sprint_field(cfg, token) or cfg["sprint_field"]
+    before = (list(cfg["extra_assignees"]), list(cfg["boards"]))
+    try:
+        choose_accounts(cfg, token, me)
+        choose_boards(cfg, token)
+    except JiraError as e:
+        cfg["extra_assignees"], cfg["boards"] = before
+        print(f"\n{e}\nKeeping the previous account and board choices.")
     save_config(cfg)
     print(f"Settings saved to {CONFIG_PATH}")
 

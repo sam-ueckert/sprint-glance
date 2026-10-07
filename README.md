@@ -29,8 +29,12 @@ If you don't have Python, run `winget install Python.Python.3.12`, or use the py
 
 1. Your Jira site, e.g. `yourcompany.atlassian.net`.
 2. The email you sign in to Jira with.
-3. An API token. Create one at <https://id.atlassian.com/manage-profile/security/api-tokens>. Setup checks it against Jira before saving it.
-4. Whether to show the window on a timer and, if so, how often.
+3. An API token. Setup lists the steps and can open the token page for you. Choose **Create API token**, not "Create API token with scopes". Setup checks the token against Jira before saving it, and prints the name it signed in as. Tokens expire on the date you pick; when yours does, run setup again.
+4. Whether some of your stories are assigned to a second Jira account. If they are, search for that account by name or email and it's added.
+5. Which boards to show: all of them, or the ones you pick. Setup lists the boards where you have stories in an active sprint, and you can search for others by name. Boards without sprints (Kanban) can't be picked.
+6. Whether to show the window on a timer and, if so, how often.
+
+Run setup again at any time to change any of these. It offers your current answers as the defaults.
 
 Setup also adds a launcher so you can open the window by hand: **Sprint Glance** in `~/Applications` on macOS, or in the Start menu on Windows.
 
@@ -67,8 +71,9 @@ Setup writes `config.json`. You can also edit it by hand:
 | Key | What it does |
 |---|---|
 | `site`, `email` | Set by setup. |
-| `extra_assignees` | Jira account IDs whose stories should also count as yours, for when work is split across two accounts. Find an ID in the URL of that person's Jira profile. |
-| `jql` | Replaces the built-in search. The default is: assigned to you, in an open sprint, not in a Done status. |
+| `extra_assignees` | Account IDs whose stories also count as yours. Setup fills this in when you add a second account. |
+| `boards` | The boards to show, as `{"id", "name"}` pairs. Empty means every board. Each run looks up the boards' active sprints, so a new sprint shows up without re-running setup. |
+| `jql` | Replaces the built-in search, and the board choice with it. The default is: assigned to you, in an active sprint, not in a Done status. |
 | `auto_close_seconds` | Seconds before the window closes. Default 90. |
 | `status_colours` | Badge colours by status name, e.g. `{"In Review": "#9333ea"}`. Otherwise grey means To Do, blue In Progress, green Done. |
 | `token_command` | Gets the token by running a command instead of reading the OS store, e.g. `["op", "read", "op://Private/Jira/token"]` for 1Password. The command must print only the token. |
@@ -89,7 +94,8 @@ Windows Python already reads the Windows certificate store.
 
 - **HTTP 401**: wrong email or token. Run the installer again.
 - **HTTP 403 after several failed attempts**: Atlassian has put a CAPTCHA on the account. Sign in once in a browser to clear it. Sprint Glance never retries a failed login, so it won't make the lockout worse.
-- **No stories but you have some**: check that they're in a sprint that has been started and not just planned. If they're assigned to a second account, add that account to `extra_assignees`.
+- **HTTP 401 with a token you just made**: check it's a plain API token, not one created with "Create API token with scopes".
+- **No stories but you have some**: check that they're in a sprint that has been started, not just planned. If they're assigned to a second account, or on a board you didn't pick, run setup again.
 - `python3 sprint_glance.py check` prints what the window would show, as JSON, without opening the window.
 
 ## Uninstall

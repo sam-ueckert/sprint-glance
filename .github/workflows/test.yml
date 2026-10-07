@@ -33,3 +33,6 @@ jobs:
       - name: JQL and site helpers
         run: |
           python -c "import sprint_glance as s; assert s.normalise_site('acme') == 'https://acme.atlassian.net'; assert 'currentUser(), \"abc\"' in s.build_jql({'extra_assignees': ['abc']}); print('ok')"
+      - name: board and picker helpers
+        run: |
+          python -c "import sprint_glance as s; assert 'sprint in (11, 12)' in s.build_jql({}, [11, 12]); assert s.pick_numbers('1, 3', 3) == [0, 2]; assert s.pick_numbers('4', 3) is None; assert s.pick_numbers('epm', 3) is None; print('ok')"
