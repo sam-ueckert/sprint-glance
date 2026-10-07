@@ -1,0 +1,35 @@
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: tkinter importable
+        run: python -c "import tkinter; print(tkinter.TkVersion)"
+      - name: credential store round trip
+        run: |
+          python -c "import sprint_glance as s; s.store_set('ci@example.com', 'AbC=_-123'); assert s.store_get('ci@example.com') == 'AbC=_-123'; s.store_delete('ci@example.com'); assert s.store_get('ci@example.com') is None; print('ok')"
+      - name: schedule on, status, off (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python sprint_glance.py schedule on 90
+          python -c "import sprint_glance as s; m = s.schedule_status(); assert m == 90, m; print('status', m)"
+          python sprint_glance.py schedule off
+          python -c "import sprint_glance as s; assert s.schedule_status() is None; print('off')"
+      - name: JQL and site helpers
+        run: |
+          python -c "import sprint_glance as s; assert s.normalise_site('acme') == 'https://acme.atlassian.net'; assert 'currentUser(), \"abc\"' in s.build_jql({'extra_assignees': ['abc']}); print('ok')"
