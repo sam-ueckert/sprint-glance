@@ -75,6 +75,8 @@ Setup writes `config.json`. You can also edit it by hand:
 | `boards` | The boards to show, as `{"id", "name"}` pairs. Empty means every board. Each run looks up the boards' active sprints, so a new sprint shows up without re-running setup. |
 | `jql` | Replaces the built-in search, and the board choice with it. The default is: assigned to you, in an active sprint, not in a Done status. |
 | `auto_close_seconds` | Seconds before the window closes. Default 90. |
+| `schedule_days` | Days timer launches may open the window, as `["mon", ... "sun"]`. Default Monday to Friday. A manual launch ignores it. |
+| `schedule_start`, `schedule_end` | Local `HH:MM` bounds for timer launches. Default `00:00` and `18:00`. The interval itself is set by `schedule on <minutes>`, because launchd and Task Scheduler read it, not this file. |
 | `status_colours` | Badge colours by status name, e.g. `{"In Review": "#9333ea"}`. Otherwise grey means To Do, blue In Progress, green Done. |
 | `token_command` | Gets the token by running a command instead of reading the OS store, e.g. `["op", "read", "op://Private/Jira/token"]` for 1Password. The command must print only the token. |
 | `sprint_field` | Set by setup, which looks up the Sprint field's ID on your site. |

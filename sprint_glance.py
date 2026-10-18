@@ -57,6 +57,9 @@ DEFAULTS = {
     "jql": "",                  # replaces the built-in query (and boards) when set
     "sprint_field": "customfield_10020",  # setup looks up the real one
     "auto_close_seconds": 90,
+    "schedule_days": ["mon", "tue", "wed", "thu", "fri"],  # days timer launches may open the window
+    "schedule_start": "00:00",  # HH:MM local; timer launches before this do nothing
+    "schedule_end": "18:00",    # HH:MM local; timer launches at or after this do nothing
     "status_colours": {},       # {"In Review": "#9333ea"} overrides by status name
     "token_command": [],        # argv that prints the token, instead of the OS store
 }
@@ -560,7 +563,30 @@ class Popup:
         self.root.after(1000, self.tick)
 
 
-def cmd_show(_args):
+DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def _minutes(hhmm):
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
+
+
+def within_schedule_window(cfg, now=None):
+    """Whether a timer launch should open the window, per schedule_* in config.json."""
+    now = now or dt.datetime.now()
+    try:
+        days = {str(d).strip().lower()[:3] for d in cfg["schedule_days"]}
+        start, end = _minutes(cfg["schedule_start"]), _minutes(cfg["schedule_end"])
+    except (TypeError, ValueError, KeyError):
+        raise RuntimeError("Bad schedule_days / schedule_start / schedule_end in "
+                           f"{CONFIG_PATH}; times are HH:MM, days are mon..sun.")
+    return DAY_NAMES[now.weekday()] in days and start <= now.hour * 60 + now.minute < end
+
+
+def cmd_show(args):
+    cfg = load_config()
+    if getattr(args, "scheduled", False) and not within_schedule_window(cfg):
+        return  # timer fired outside the configured window; a manual launch still opens
     if tk is None:
         sys.exit("This Python has no tkinter. Run the installer again to pick one that does.")
     if IS_WIN:
@@ -568,7 +594,7 @@ def cmd_show(_args):
             ctypes.windll.shcore.SetProcessDpiAwareness(1)  # sharp text on scaled displays
         except (AttributeError, OSError):
             pass
-    Popup(load_config()).root.mainloop()
+    Popup(cfg).root.mainloop()
 
 
 def cmd_check(_args):
@@ -600,7 +626,7 @@ def schedule_on(minutes):
     if IS_MAC:
         plist = {
             "Label": MAC_LABEL,
-            "ProgramArguments": [gui_python(), SCRIPT],
+            "ProgramArguments": [gui_python(), SCRIPT, "show", "--scheduled"],
             "StartInterval": minutes * 60,
             "RunAtLoad": True,
             "LimitLoadToSessionType": "Aqua",
@@ -658,7 +684,7 @@ def _win_schedule(minutes):
   <Actions Context="Author">
     <Exec>
       <Command>{xml_escape(gui_python())}</Command>
-      <Arguments>{xml_escape(f'"{SCRIPT}"')}</Arguments>
+      <Arguments>{xml_escape(f'"{SCRIPT}" show --scheduled')}</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -1013,7 +1039,9 @@ def cmd_uninstall(_args):
 def main():
     parser = argparse.ArgumentParser(prog="sprint_glance.py", description=DISPLAY_NAME)
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("show", help="show the window (the default)")
+    show = sub.add_parser("show", help="show the window (the default)")
+    show.add_argument("--scheduled", action="store_true",
+                      help="launched by the timer: do nothing outside the schedule_* window in config.json")
     sub.add_parser("setup", help="connect to Jira and choose a schedule")
     sub.add_parser("check", help="print stories as JSON")
     sub.add_parser("uninstall", help="remove everything setup created")
